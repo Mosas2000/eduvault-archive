@@ -1,11 +1,10 @@
 "use client";
 
-// Purchases library page: shows purchased materials for the authenticated buyer, with empty/loading/error/disconnected states.
-
 import { useEffect, useState, useCallback } from "react";
-import { FaDownload, FaExternalLinkAlt, FaShoppingBag, FaSpinner, FaCheckCircle } from "react-icons/fa";
+import { FaDownload, FaExternalLinkAlt, FaShoppingBag, FaSpinner, FaCheckCircle, FaUndoAlt } from "react-icons/fa";
 import { MdOutlineSchool } from "react-icons/md";
 import { getExplorerTxUrl } from "@/lib/config/chain";
+import RefundForm from "@/components/RefundForm";
 import CopyButton from "@/components/CopyButton";
 
 function formatDate(dateStr) {
@@ -22,23 +21,13 @@ function truncateHash(hash) {
   return `${hash.slice(0, 8)}…${hash.slice(-6)}`;
 }
 
-function formatSpeed(bytesPerSec) {
-  if (!bytesPerSec) return "0 B/s";
-  const mb = bytesPerSec / (1024 * 1024);
-  if (mb >= 1) return `${mb.toFixed(1)} MB/s`;
-  const kb = bytesPerSec / 1024;
-  return `${kb.toFixed(1)} KB/s`;
+function isRefundEligible(purchasedAt) {
+  const purchaseDate = new Date(purchasedAt);
+  const now = new Date();
+  const hoursSincePurchase = (now - purchaseDate) / (1000 * 60 * 60);
+  return hoursSincePurchase <= 48;
 }
 
-function formatETA(seconds) {
-  if (seconds === null || isNaN(seconds) || seconds === Infinity) return "Estimating...";
-  if (seconds < 60) return `${Math.floor(seconds)}s left`;
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}m ${s}s left`;
-}
-
-// ─── Skeleton card ────────────────────────────────────────────────────────────
 function SkeletonCard() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-5 animate-pulse">
@@ -53,19 +42,18 @@ function SkeletonCard() {
   );
 }
 
-// ─── Empty state ──────────────────────────────────────────────────────────────
 function EmptyState() {
   return (
     <div className="flex flex-col items-center justify-center py-24 text-center">
       <div className="w-20 h-20 rounded-full bg-blue-50 flex items-center justify-center mb-5">
         <MdOutlineSchool className="text-blue-400 text-4xl" />
       </div>
-      <h2 className="text-xl font-semibold text-gray-800 mb-2">No purchases yet</h2>
+      <h2 className="text-xl font-semibold text-gray-800 mb-2">No materials yet</h2>
       <p className="text-sm text-gray-500 max-w-xs mb-6">
         Head over to the marketplace to discover and purchase educational materials.
       </p>
       <a
-        href="/dashboard/market"
+        href="/marketplace"
         className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-full hover:bg-blue-700 transition-colors"
       >
         <FaShoppingBag size={14} />
@@ -75,16 +63,13 @@ function EmptyState() {
   );
 }
 
-// ─── Material card ────────────────────────────────────────────────────────────
-function PurchasedMaterialCard({ item }) {
+function PurchasedMaterialCard({ item, onRefundClick }) {
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState(null);
-  const [progress, setProgress] = useState(null);
 
   const handleDownload = useCallback(async () => {
     setDownloading(true);
     setDownloadError(null);
-    setProgress({ percent: 0, speed: 0, eta: null });
     try {
       const res = await fetch(`/api/materials/download/${item.materialId}`);
       if (!res.ok) {
@@ -99,84 +84,29 @@ function PurchasedMaterialCard({ item }) {
         throw new Error("Failed to connect to storage gateway");
       }
 
-      const contentLength = response.headers.get("Content-Length");
-      const totalBytes = contentLength ? parseInt(contentLength, 10) : null;
-
-      let loadedBytes = 0;
-      const startTime = Date.now();
-      let lastReportTime = startTime;
-      let lastReportBytes = 0;
-
-      if (!response.body) {
-        throw new Error("ReadableStream not supported by the browser");
-      }
-
-      const reader = response.body.getReader();
-      const chunks = [];
-
-      while (true) {
-        const { done, value } = await reader.read();
-
-        if (done) {
-          break;
-        }
-
-        chunks.push(value);
-        loadedBytes += value.length;
-
-        const now = Date.now();
-        if (now - lastReportTime > 250) {
-          const timeDiff = (now - lastReportTime) / 1000;
-          const bytesDiff = loadedBytes - lastReportBytes;
-          const speed = bytesDiff / timeDiff;
-
-          let percent = 0;
-          let eta = null;
-
-          if (totalBytes) {
-            percent = Math.floor((loadedBytes / totalBytes) * 100);
-            const remainingBytes = totalBytes - loadedBytes;
-            eta = speed > 0 ? remainingBytes / speed : null;
-          }
-
-          setProgress({ percent, speed, eta });
-          lastReportTime = now;
-          lastReportBytes = loadedBytes;
-        }
-      }
-
-      setProgress({ percent: 100, speed: 0, eta: 0 });
-
-      const blob = new Blob(chunks, {
-        type: response.headers.get("Content-Type") || "application/octet-stream",
-      });
+      const blob = await response.blob();
       const objectUrl = URL.createObjectURL(blob);
-
       const anchor = document.createElement("a");
       anchor.href = objectUrl;
       anchor.download = title;
       anchor.click();
-
       setTimeout(() => URL.revokeObjectURL(objectUrl), 10000);
     } catch (err) {
       setDownloadError(err.message);
     } finally {
       setDownloading(false);
-      setTimeout(() => setProgress(null), 2000);
     }
   }, [item.materialId]);
 
   const material = item.material;
   const title = material?.title || `Material #${item.materialId}`;
   const description = material?.description || "";
-  const price = material?.price != null ? `${material.price} XLM` : "—";
+  const eligible = isRefundEligible(item.purchasedAt);
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow flex flex-col">
-      {/* Thumbnail / placeholder */}
       <div className="w-full h-36 bg-linear-to-br from-blue-50 to-purple-50 rounded-t-xl flex items-center justify-center overflow-hidden">
         {material?.thumbnailUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element
           <img
             src={material.thumbnailUrl}
             alt={title}
@@ -197,7 +127,6 @@ function PurchasedMaterialCard({ item }) {
         )}
 
         <div className="mt-auto space-y-2">
-          {/* Purchase meta */}
           <div className="flex items-center justify-between text-xs text-gray-400">
             <span>Purchased {formatDate(item.purchasedAt)}</span>
             <span className="flex items-center gap-1 text-green-600 font-medium">
@@ -228,48 +157,40 @@ function PurchasedMaterialCard({ item }) {
             <p className="text-xs text-red-500">{downloadError}</p>
           )}
 
-          {/* Actions */}
-          {progress && downloading ? (
-            <div className="w-full mb-1">
-              <div className="flex justify-between text-xs text-gray-500 mb-1">
-                <span>{formatSpeed(progress.speed)}</span>
-                <span>{formatETA(progress.eta)}</span>
-              </div>
-              <div className="w-full bg-gray-200 rounded-full h-2 mb-1 overflow-hidden relative">
-                <div 
-                  className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                  style={{ width: `${progress.percent}%` }}
-                />
-              </div>
-              <div className="text-center text-xs font-medium text-blue-600">
-                {progress.percent}% Completed
-              </div>
-            </div>
-          ) : (
+          <div className="flex gap-2">
             <button
               onClick={handleDownload}
               disabled={downloading}
-              className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white text-sm font-medium rounded-lg transition-colors"
+              className="flex-1 flex items-center justify-center gap-2 py-2 px-4 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white text-sm font-medium rounded-lg transition-colors"
             >
               {downloading ? (
                 <FaSpinner className="animate-spin" size={14} />
               ) : (
                 <FaDownload size={14} />
               )}
-              {downloading ? "Preparing…" : "Download / View"}
+              {downloading ? "Preparing…" : "Download"}
             </button>
-          )}
+            {eligible && (
+              <button
+                onClick={() => onRefundClick?.(item)}
+                className="flex-1 flex items-center justify-center gap-2 py-2 px-4 bg-orange-100 hover:bg-orange-200 text-orange-700 text-sm font-medium rounded-lg transition-colors"
+              >
+                <FaUndoAlt size={14} />
+                Refund
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-// ─── Page ─────────────────────────────────────────────────────────────────────
-export default function PurchasesPage() {
+export default function LibraryPage() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [selectedItem, setSelectedItem] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -278,7 +199,7 @@ export default function PurchasesPage() {
         const res = await fetch("/api/purchased-materials");
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
-          throw new Error(body.error || "Failed to load purchases");
+          throw new Error(body.error || "Failed to load materials");
         }
         const data = await res.json();
         if (!cancelled) setItems(data);
@@ -291,17 +212,19 @@ export default function PurchasesPage() {
     return () => { cancelled = true; };
   }, []);
 
+  const handleRefundSubmit = async () => {
+    setItems(items.filter(i => i.purchaseId !== selectedItem.purchaseId));
+  };
+
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900">
-      {/* Page header */}
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-gray-900 mb-1">My Library</h1>
         <p className="text-sm text-gray-500">
-          Materials you own — access is verified by your on-chain entitlement.
+          Materials you own - access is verified by your on-chain entitlement.
         </p>
       </div>
 
-      {/* Content */}
       {loading && (
         <div className="grid sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
           {Array.from({ length: 8 }).map((_, i) => <SkeletonCard key={i} />)}
@@ -325,14 +248,26 @@ export default function PurchasesPage() {
       {!loading && !error && items.length > 0 && (
         <>
           <p className="text-xs text-gray-400 mb-4">
-            {items.length} {items.length === 1 ? "item" : "items"} purchased
+            {items.length} {items.length === 1 ? "item" : "items"} in library
           </p>
           <div className="grid sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
             {items.map((item) => (
-              <PurchasedMaterialCard key={item.purchaseId} item={item} />
+              <PurchasedMaterialCard
+                key={item.purchaseId}
+                item={item}
+                onRefundClick={setSelectedItem}
+              />
             ))}
           </div>
         </>
+      )}
+
+      {selectedItem && (
+        <RefundForm
+          item={selectedItem}
+          onClose={() => setSelectedItem(null)}
+          onSubmit={handleRefundSubmit}
+        />
       )}
     </div>
   );
